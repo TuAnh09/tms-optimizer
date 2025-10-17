@@ -1,7 +1,0 @@
-pip 
-install 
-streamlit 
-ortools 
-folium 
-pandas 
-geopy
