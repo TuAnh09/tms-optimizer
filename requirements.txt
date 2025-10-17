@@ -1,5 +1,7 @@
-streamlit
-pandas
-numpy
-folium
-streamlit-folium
+pip 
+install 
+streamlit 
+ortools 
+folium 
+pandas 
+geopy
