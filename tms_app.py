@@ -1,62 +1,80 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import folium
 from streamlit_folium import st_folium
+from geopy.distance import geodesic
+from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-# Tiêu đề trang
-st.set_page_config(page_title="TMS - Tối ưu hóa tuyến đường", layout="wide")
-st.title("🚚 Ứng dụng Tối ưu hoá Tuyến đường Vận tải (TMS)")
+st.set_page_config(page_title="TMS - Tối ưu tuyến đường", layout="wide")
+st.title("🚚 Ứng dụng TMS tối ưu hóa tuyến đường")
 
-st.write("""
-Ứng dụng mô phỏng hệ thống **Transportation Management System (TMS)** — giúp nhập dữ liệu tuyến đường, 
-tính toán chi phí vận chuyển và hiển thị bản đồ tuyến.
-""")
+# Nhập dữ liệu đơn hàng
+st.sidebar.header("📦 Nhập đơn hàng")
+address = st.sidebar.text_input("Địa chỉ (mô tả)")
+lat = st.sidebar.number_input("Latitude", format="%.6f")
+lng = st.sidebar.number_input("Longitude", format="%.6f")
+weight = st.sidebar.number_input("Trọng lượng", min_value=0.0)
 
-# Nhập dữ liệu
-st.sidebar.header("📦 Nhập dữ liệu")
-uploaded_file = st.sidebar.file_uploader("Tải file CSV (chứa Tên điểm, Vĩ độ, Kinh độ, Quãng đường_km)", type="csv")
+if "orders" not in st.session_state:
+    st.session_state.orders = []
 
-# Nếu không có file, cho phép nhập thủ công
-if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-else:
-    st.sidebar.write("Hoặc nhập dữ liệu mẫu:")
-    data = {
-        "Tên điểm": ["Kho", "Cửa hàng A", "Cửa hàng B"],
-        "Vĩ độ": [10.762622, 10.776889, 10.780100],
-        "Kinh độ": [106.660172, 106.695200, 106.640000],
-        "Quãng đường_km": [0, 5.2, 3.8]
-    }
-    df = pd.DataFrame(data)
+if st.sidebar.button("Thêm đơn hàng"):
+    st.session_state.orders.append({
+        "address": address,
+        "lat": lat,
+        "lng": lng,
+        "weight": weight
+    })
 
-st.subheader("📋 Dữ liệu tuyến đường")
+df = pd.DataFrame(st.session_state.orders)
+st.subheader("📋 Danh sách đơn hàng")
 st.dataframe(df)
 
-# Tính toán chi phí vận tải
-fuel_cost = st.sidebar.number_input("Chi phí nhiên liệu (VND/km):", value=15000)
-driver_cost = st.sidebar.number_input("Chi phí tài xế (VND/giờ):", value=80000)
-avg_speed = st.sidebar.number_input("Tốc độ trung bình (km/h):", value=40)
+# Tối ưu tuyến đường
+if st.button("🚀 Tối ưu tuyến đường"):
+    if len(df) < 2:
+        st.warning("Cần ít nhất 2 đơn hàng để tối ưu.")
+    else:
+        locations = list(zip(df['lat'], df['lng']))
+        distance_matrix = [
+            [int(geodesic(a, b).km) for b in locations]
+            for a in locations
+        ]
 
-df["Thời gian (giờ)"] = df["Quãng đường_km"] / avg_speed
-df["Chi phí vận chuyển (VND)"] = df["Quãng đường_km"] * fuel_cost + df["Thời gian (giờ)"] * driver_cost
+        manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, 0)
+        routing = pywrapcp.RoutingModel(manager)
 
-st.subheader("💰 Kết quả tính toán")
-st.dataframe(df)
+        def distance_callback(i, j):
+            return distance_matrix[manager.IndexToNode(i)][manager.IndexToNode(j)]
 
-# Tổng chi phí
-total_cost = df["Chi phí vận chuyển (VND)"].sum()
-st.success(f"**Tổng chi phí dự kiến:** {total_cost:,.0f} VND")
+        transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+        routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-# Hiển thị bản đồ
-st.subheader("🗺️ Bản đồ tuyến đường")
-m = folium.Map(location=[df["Vĩ độ"].mean(), df["Kinh độ"].mean()], zoom_start=13)
+        search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+        search_parameters.time_limit.seconds = 10
+        solution = routing.SolveWithParameters(search_parameters)
 
-for i, row in df.iterrows():
-    folium.Marker(
-        location=[row["Vĩ độ"], row["Kinh độ"]],
-        popup=f"{row['Tên điểm']}: {row['Quãng đường_km']} km",
-        icon=folium.Icon(color="blue" if i == 0 else "green")
-    ).add_to(m)
+        route = []
+        index = routing.Start(0)
+        while not routing.IsEnd(index):
+            route.append(manager.IndexToNode(index))
+            index = solution.Value(routing.NextVar(index))
+        route.append(manager.IndexToNode(index))
 
-st_folium(m, width=700, height=500)
+        # Hiển thị bản đồ
+        st.subheader("🗺️ Bản đồ tuyến đường tối ưu")
+        m = folium.Map(location=locations[0], zoom_start=13)
+        for i in route:
+            folium.Marker(locations[i], tooltip=f"Order {i}: {df.iloc[i]['address']}").add_to(m)
+        folium.PolyLine([locations[i] for i in route], color="blue").add_to(m)
+        st_folium(m, width=800, height=500)
+
+        # Báo cáo
+        total_distance = sum(
+            geodesic(locations[route[i]], locations[route[i+1]]).km
+            for i in range(len(route)-1)
+        )
+        st.subheader("📊 Báo cáo kết quả")
+        st.metric("Tổng quãng đường", f"{total_distance:.2f} km")
+        st.metric("Số đơn hàng", len(df))
+        st.metric("Thứ tự giao hàng", " → ".join([str(i) for i in route]))
